@@ -1,17 +1,17 @@
-import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox
-import PIL.ImageGrab as ImageGrab
+import cv2
+import time
 import PIL.Image
 import PIL.ImageTk
-import cv2
+import tkinter as tk
+from tkinter import colorchooser, filedialog, messagebox
 from threading import Thread
-import numpy as np
-import time
+from tkinter import IntVar, StringVar
+from collections import deque
+from emotion_detection import detect_emotion  # Importing the emotion detection function
 
 class PaintApp:
-    def __init__(self, root, face_detector):
+    def __init__(self, root):
         self.root = root
-        self.face_detector = face_detector
         self.current_frame = None
         self.nose_tracking_mode = tk.BooleanVar(value=False)
         self.cursor_x = 0
@@ -25,22 +25,40 @@ class PaintApp:
         self.prev_x = None
         self.prev_y = None
         self.current_tool = "pencil"
-
         self.cursor_size = tk.IntVar(value=10)
 
+        # Initialize emotion confidence
+        self.emotion_confidence = {
+            "Roudra": 0.0,  # Angry
+            "Bhayanaka": 0.0,  # Fearful
+            "Hasya": 0.0,  # Happy
+            "Shanta": 0.0,  # Neutral
+            "Karuna": 0.0,  # Sad
+            "Adbhuta": 0.0  # Surprised
+        }
+
+        self.previous_emotion = None
         self.setup_ui()
-        
+
         self.cap = cv2.VideoCapture(0)
         self.emotion = "No emotion detected"
         self.current_frame = None
-        
+
         self.video_thread = Thread(target=self.update_video, daemon=True)
         self.video_thread.start()
 
         self.nose_tracking_thread = Thread(target=self.nose_tracking, daemon=True)
         self.nose_tracking_thread.start()
 
+    def handle_key_press(self, event):
+        # For example, toggle between pencil and eraser on key press
+        if event.keysym == 'e':  # 'e' for eraser
+            self.use_eraser()
+        elif event.keysym == 'p':  # 'p' for pencil
+            self.use_pencil()
+
     def setup_ui(self):
+        # Setup the main UI structure
         main_frame = tk.Frame(self.root, bg="#f0f0f0")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -86,7 +104,7 @@ class PaintApp:
         tk.Button(toolbar, text="Clear", command=self.clear).pack(fill=tk.X)
         tk.Button(toolbar, text="Save", command=self.save_image).pack(fill=tk.X)
         tk.Button(toolbar, text="New", command=self.create_new).pack(fill=tk.X)
-        
+
         tk.Label(toolbar, text="Stroke Size").pack()
         tk.Scale(toolbar, variable=self.stroke_size, from_=1, to=10, orient=tk.HORIZONTAL).pack()
 
@@ -107,6 +125,11 @@ class PaintApp:
         if not self.nose_tracking_mode.get():
             self.paint(event.x, event.y)
 
+    def select_color(self):
+        color = colorchooser.askcolor()[1]  # askcolor() returns a tuple (RGB, hex value)
+        if color:
+            self.stroke_color.set(color)  # Update the stroke color to the selected color
+
     def paint(self, x, y):
         if self.prev_x is not None and self.prev_y is not None:
             if self.current_tool == "pencil":
@@ -117,13 +140,13 @@ class PaintApp:
                 self.canvas.create_line(self.prev_x, self.prev_y, x, y,
                                         fill="white", width=self.stroke_size.get() * 2,
                                         capstyle=tk.ROUND, smooth=tk.TRUE)
-        
+
         self.prev_x, self.prev_y = x, y
         self.update_cursor(x, y)
 
     def update_cursor(self, x, y):
         size = self.cursor_size.get()
-        self.canvas.coords(self.cursor, x-size//2, y-size//2, x+size//2, y+size//2)
+        self.canvas.coords(self.cursor, x-size//1.5, y-size//1.5, x+size//1.5, y+size//1.5)
 
     def update_cursor_size(self, _):
         self.update_cursor(self.cursor_x, self.cursor_y)
@@ -138,93 +161,53 @@ class PaintApp:
 
     def use_eraser(self):
         self.current_tool = "eraser"
-        self.canvas.config(cursor="dotbox")
-
-    def select_color(self):
-        color = colorchooser.askcolor(title="Select Color")[1]
-        if color:
-            self.stroke_color.set(color)
-
-    def save_image(self):
-        file_path = filedialog.asksaveasfilename(defaultextension=".png")
-        if file_path:
-            x = self.root.winfo_rootx() + self.canvas.winfo_x()
-            y = self.root.winfo_rooty() + self.canvas.winfo_y()
-            x1 = x + self.canvas.winfo_width()
-            y1 = y + self.canvas.winfo_height()
-            ImageGrab.grab().crop((x, y, x1, y1)).save(file_path)
-
-    def create_new(self):
-        if messagebox.askyesno("New Canvas", "Do you want to save before creating a new canvas?"):
-            self.save_image()
-        self.clear()
+        self.canvas.config(cursor="circle")
 
     def clear(self):
         self.canvas.delete("all")
-        self.cursor = self.canvas.create_oval(0, 0, self.cursor_size.get(), self.cursor_size.get(), fill="red", outline="red")
-        print("Canvas cleared")
+
+    def save_image(self):
+        file = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG Files", "*.png")])
+        if file:
+            self.canvas.postscript(file="temp.ps")
+            img = PIL.Image.open("temp.ps")
+            img.save(file, "PNG")
+            os.remove("temp.ps")
+
+    def create_new(self):
+        self.canvas.delete("all")
 
     def update_video(self):
         while True:
-            try:
-                ret, frame = self.cap.read()
-                if ret:
-                    self.current_frame = frame
-                    face_data = self.face_detector.process_frame(frame)
-                    if face_data['emotion']:
-                        self.emotion = face_data['emotion']
-                        self.update_tool_based_on_emotion(self.emotion)
-                    
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frame = cv2.resize(frame, (200, 150))
-                    photo = PIL.ImageTk.PhotoImage(image=PIL.Image.fromarray(frame))
-                    
-                    self.video_frame.config(image=photo)
-                    self.video_frame.image = photo
-                    self.emotion_label.config(text=f"Emotion: {self.emotion}")
-                else:
-                    print("Failed to capture frame")
-            except Exception as e:
-                print(f"Error in video processing: {str(e)}")
-            
-            time.sleep(0.01)
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
 
-    def update_tool_based_on_emotion(self, emotion):
-        if emotion in ['angry', 'neutral','happy']:
-            self.use_pencil()
-        elif emotion == 'sad':
-            self.use_eraser()
-        elif emotion in [ 'surprise']:
-            self.clear()
+            # Convert the frame to RGB for Tkinter
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = PIL.Image.fromarray(frame_rgb)
+            img_tk = PIL.ImageTk.PhotoImage(img)
+
+            # Update the video frame with the new image
+            self.video_frame.config(image=img_tk)
+            self.video_frame.image = img_tk
+
+            # Detect emotion and update UI
+            self.emotion = detect_emotion(frame)
+            self.emotion_label.config(text=f"Emotion: {self.emotion}")
+
+            time.sleep(0.03)  # Slight delay to make video feed smooth
 
     def nose_tracking(self):
         while True:
-            if self.nose_tracking_mode.get() and self.current_frame is not None:
-                face_data = self.face_detector.process_frame(self.current_frame)
-                if face_data['landmarks']:
-                    nose_tip = face_data['landmarks'].landmark[4]
-                    x = int((1 - nose_tip.x) * self.canvas.winfo_width())
-                    y = int(nose_tip.y * self.canvas.winfo_height())
+            if self.nose_tracking_mode.get():
+                self.nose_tracking_update()
 
-                    new_x = max(0, min(x, self.canvas.winfo_width()))
-                    new_y = max(0, min(y, self.canvas.winfo_height()))
+    def nose_tracking_update(self):
+        # Implement your logic for nose tracking and update the cursor position
+        pass
 
-                    self.paint(new_x, new_y)
-                    self.cursor_x, self.cursor_y = new_x, new_y
-
-            time.sleep(0.01)
-
-    def handle_key_press(self, event):
-        if event.char == 'p':
-            self.use_pencil()
-        elif event.char == 'e':
-            self.use_eraser()
-        elif event.char == 'c':
-            self.select_color()
-        elif event.char == 's':
-            self.save_image()
-        elif event.char == 'n':
-            self.create_new()
-
-    def run(self):
-         self.root.mainloop()
+# Example of running the app
+root = tk.Tk()
+app = PaintApp(root)
+root.mainloop()
